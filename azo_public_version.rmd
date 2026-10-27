@@ -1,0 +1,803 @@
+---
+title: "Azospirillum analysis workflow"
+output: html_document
+---
+
+Download azospirillaceae
+```{bash}
+cat genome_accessions | while read line;do datasets download genome accession $line; mv ncbi_dataset.zip $line\.zip;done 
+
+cat genome_accessions | while read line;do unzip -o $line;mv ncbi_dataset $line;done
+```
+
+Avaliações de qualidade e filtragens
+
+```{bash}
+cat ../genome_accessions | while read line;do quast -o quast/$line --gene-finding --min-contig 500 $line\.fna;done
+```
+
+```{bash}
+checkm lineage_wf --threads 40 -x fna fna/ checkm/
+```
+
+```{bash}
+awk '{print $1 , $30 $32 $48}' bin_stats_ext.tsv | sed -r 's/,/\t/g' | sed -r 's/\s/\t/' > metrics
+```
+
+```{r}
+filtering_data <- read.csv2('data/metrics', sep = '\t', row.names = 1)
+
+colnames(filtering_data) <- c('contamination', 'gc', 'contigs', 'x')
+filtering_data$x <- NULL
+filtering_data$contamination <- filtering_data$contamination |> as.numeric()
+filtering_data$gc <- filtering_data$gc |> as.numeric()
+filtering_data$contigs <- filtering_data$contigs |> as.numeric()
+
+```
+
+```{r}
+filtering_data |> dplyr::filter(contamination < 10) |> dplyr::filter(contigs < 500) |> rownames() |> writeLines()
+```
+```{bash}
+cat filtered_accessions | while read line;do cp genomes/fna/$line* filtered_genomes/;done
+```
+
+```{bash}
+wget https://busco-data.ezlab.org/v5/data/lineages/rhodospirillales_odb10.2024-01-08.tar.gz
+```
+
+```{bash}
+ls | while read line;do busco -i ../analysis_stage/genomes/fna/$line -l ./rhodospirillales_odb10/ -m genome -f -o final/$line\_busco -c 50;done
+```
+
+```{bash}
+mkdir quality_summaries
+cat filter | while read line;do cp final/$line\_busco/short_summary*$line\_busco.txt quality_summaries/$line\.txt;done
+cd quality_summaries
+
+grep "C:" *.txt > comp
+sed -i 's/%/  /g' comp
+cat comp | awk '{print $1, $2, $4}' > col
+sed -i 's/C://g' col
+sed -i 's/,D://g' col
+sed -i 's/.txt://g' col
+
+cat col | awk '$3<10' > duplication
+cat col | awk '$2>90' > completeness
+
+```
+
+```{r}
+
+compl_dup <- read.csv2('data/col', sep = ' ', header = F)
+colnames(compl_dup) <- c('genomes', 'completeness', 'duplication')
+compl_dup$completeness <- as.numeric(compl_dup$completeness)
+compl_dup$duplication <- as.numeric(compl_dup$duplication)
+metadados <- metadados |> dplyr::left_join(compl_dup, by = c('V1' = 'genomes'))
+```
+```{r}
+table_s1 <- filtering_data |> dplyr::left_join(compl_dup, by = c('V1' = 'genomes'))
+table_s1 <- table_s1[,c(4,3,2,5,6,1)]
+colnames(table_s1) <- c('GenBank', 'Number of contigs', 'GC (%)', 'Completeness (%)', 'Duplication (%)', 'Contamination (%)')
+table_s1$`GC (%)` <- table_s1$`GC (%)`*100
+table_s1$`GC (%)` <- round(digits = 1, table_s1$`GC (%)`)
+table_s1$`Contamination (%)` <- round(digits = 1, table_s1$`Contamination (%)`)
+#table_s1 <- table_s1 |> dplyr::filter(GenBank != 'Isolate_1') |> dplyr::filter(GenBank != 'Isolate_2') |> dplyr::filter(GenBank != 'Isolate_4') |> dplyr::filter(GenBank != 'Isolate_3')
+table_s1 <- table_s1 |> dplyr::left_join(N50, by = c('GenBank' = 'V1'))
+table_s1 <- table_s1[,-6]
+colnames(table_s1) <- c('GenBank Accession', 'Number of contigs', 'GC (%)', 'Completeness (%)', 'Duplication (%)', 'N50')
+
+table_s1$N50 <- c(table_s1$N50[1:296], 1031329, 3561338, 1794434, 1117325)
+table_s1$`GenBank Accession` <- c(table_s1$`GenBank Accession`[1:296], 'New isolate B', 'New isolate C', 'New isolate D', 'New isolate A')
+
+table_s1$`Is Azospirilum` <- ifelse(table_s1$`GenBank Accession` %in% my_custom_row_order, "Yes", "No")
+
+```
+
+```{r}
+
+metadados <- filtering_data |> dplyr::filter(contigs < 500)  |> dplyr::filter(duplication < 10) |> dplyr::filter(completeness > 90)
+```
+
+```{r}
+compl_dup$completeness <- as.numeric(compl_dup$completeness)
+compl_dup$duplication <- as.numeric(compl_dup$duplication)
+compl_dup <- compl_dup |> dplyr::filter(completeness > 95) |> dplyr::filter(duplication < 5)
+compl_dup$genomes |> writeLines()
+```
+
+## Filtragem por metadados
+
+```{r}
+metadados |> dplyr::filter(contigs < 500) |> dplyr::filter(completeness > 90) |> dplyr::filter(duplication < 5) |> rownames() |> writeLines()
+```
+
+```{bash}
+./../mash/mash triangle -p 40 -l final -s 1000 -d 0.005
+sed -i 's/.fna//g' mash_redundance
+```
+
+```{bash}
+#N50
+awk '{print $1,  $60}' bin_stats_ext.tsv | sed -i 's/,//g'
+```
+
+```{r}
+N50 <- read.csv2('data/N50', sep = ' ', header = F)
+colnames(N50) <- c('V1', 'N50')
+
+N50 |> dplyr::right_join(redundance) |> dplyr::arrange(-N50)
+  
+```
+```{r}
+redundance_graph
+
+clusters <- igraph::cluster_louvain(redundance_graph)
+membership <- igraph::membership(clusters)
+
+temp <- N50
+colnames(temp) <- c('genome', 'N50')
+# Merge N50 values with membership
+membership_df <- data.frame(genome = names(membership), cluster = membership)
+n50_df <- merge(membership_df, temp, by = "genome")
+
+n50_df$cluster <- as.factor(n50_df$cluster)
+n50_df <- n50_df |> dplyr::group_by(cluster) |> dplyr::arrange(-N50) |> dplyr::arrange(cluster)
+
+final_redundance <- n50_df |> dplyr::group_by(cluster) |> dplyr::slice(1)
+removable <- n50_df |> dplyr::anti_join(final_redundance)
+removable$genome |> writeLines()
+```
+
+## Genus delimitation
+
+```{bash}
+average_nucleotide_identity.py -i analysis_stage/final/ -o analysis_stage/ -f -m ANIm --workers 60
+```
+
+```{r}
+ani <- read.csv2('data/ANIm_percentage_identity.tab', sep = '\t', row.names = 1)
+ani <- as.matrix(ani)
+class(ani) <- 'numeric'
+```
+
+```{r}
+annotations <- read.csv2('data/species_list', header = F, sep = '\t')
+colnames(annotations) <- c('genomes', 'ncbi_epithet', 'taxid')
+
+# metadados <- N50 |> dplyr::left_join(filtering_data) |> dplyr::left_join(compl_dup, by = c('V1' = 'genomes'))
+# 
+# metadados <- metadados |> dplyr::left_join(annotations, by = c('V1' = 'genomes'))
+# metadados$genus_name <- sub(" .*", "", metadados$ncbi_epithet)
+# metadados$genus_name <- sub("uncultured", "Azospirillum", metadados$genus_name)
+# metadados <- metadados |> dplyr::select(-contamination)
+```
+
+#### Adding our isolates and fixing NAs 
+
+```{r}
+isolados <- data.frame(V1 = c('Isolate_1', 'Isolate_2', 'Isolate_3', 'Isolate_4'), completeness = c(98.20, 93.50, 98.30, 98.5), duplication = c(1.9, 1.3, 1.9, 2.1), ncbi_epithet = c('New isolate A', 'New isolate B', 'New isolate C', 'New isolate D'), genus_name = c('New isolate A', 'New isolate B', 'New isolate C', 'New isolate D'), gc = c(0.67, 0.68, 0.69, 0.68), N50 = c(1117325, 1031329, 3561338, 1794434), contigs = c(9, 6, 6, 6), taxid = c('-', '-', '-', '-'))
+
+metadados <- isolados |> rbind(metadados)
+
+temp <- metadados[8,]
+temp <- data.frame(V1 = 'GCA_001917125.1', completeness = NA, duplication = NA, ncbi_epithet = 'Azospirillum sp. 47_25', genus_name = 'Azospirillum', gc = 0.47, N50 = 59011, contigs = 57, taxid = 1896971)
+metadados <- metadados[-8,]
+metadados <- metadados |> rbind(temp)
+```
+
+
+```{bash}
+# Assuming you have a file 'accessions.txt' with one accession number per line
+cat genome_accessions | while read acc;do esearch -db assembly -query $acc | elink -target taxonomy | efetch -format docsum | xtract -pattern DocumentSummary -element ScientificName,TaxId;done
+
+```
+
+##Orthofinder
+```{bash}
+#na pasta dos resultados do busco
+
+cat ../../ok_genomes | while read line;do cp $line.fna_busco/prodigal_output/predicted_genes/predicted.faa ../../analysis_stage/orthofinder/faa/$line\.faa;done
+
+orthofinder -f faa/ -M msa -t 40 -a 30
+conda deactivate
+conda activate iqtree
+iqtree -s faa/OrthoFinder/Results_Jan17/MultipleSequenceAlignments/SpeciesTreeAlignment.fa -st AA -seed 2000 -T 45 -o GCA_000013085.1 -m TEST -B 1000
+
+```
+
+## Getting the Azospirillum genomes
+
+## Prokka
+
+Copiei os genomas da lista pra uma pasta separada
+
+```{bash}
+cat selected_genomes | while read line;do prokka --outdir analysis_stage/$line --prefix $line analysis_stage/$line\.fna;done
+
+```
+
+## Roary
+
+```{bash}
+roary -e -n -v -f analysis_stage/ analysis_stage/gff/*.gff
+
+panaroo -t 30 -i gff/*.gff -o analysis_stage --mode 'moderate'
+```
+
+## Resistome and virulome
+
+```{bash}
+
+wget "https://card.mcmaster.ca/download/0/broadstreet-v3.1.3.tar.bz2"
+tar -xf broadstreet-v3.1.3.tar.bz2
+
+```
+
+```{bash}
+#criando a db
+./usearch -makeudb_usearch protein_fasta_protein_homolog_model.fasta -output resistome.udb
+
+#rodando
+for i in ../analysis_stage/usearch/*; do echo processing $i; GENOME=$(basename $i .faa); ./usearch -usearch_global $i -db resistome.udb -top_hit_only -evalue 1.0e-05 -id 0.5 -query_cov 0.5 -target_cov 0.5 -userout $GENOME\.res -userfields query+target+id+evalue+qlo+qhi+tlo+thi+ql+tl+bits;done
+
+#adicionando coluna com o nome da cepa
+for i in *.res; do echo processing $i; GENOME=$(basename $i .res); sed -i "s/^/$GENOME\t/g" $i;done
+
+#fazendo um arquivo só
+
+cat *.res > resistome
+
+```
+
+```{r}
+
+resistome <- read.csv('data/resistome', sep = '\t', header = F)
+
+colnames(resistome) <- c("genome", "query", "gene_info", "id", "evalue", "qlo", "qhi", "tlo", "thi", "ql", "tl", "bits")
+resistome$genome <- as.factor(resistome$genome)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+resistome <- resistome |>
+  mutate(partes = str_split(gene_info, "\\|"),  # Divide a string pelo "|"
+         gene = sapply(partes, function(x) if(length(x) >= 4) str_trim(str_split(x[4], "\\[")[[1]][1]) else NA) # Pega a 4ª parte e remove o que vem depois de "["
+  ) |> select(-partes)
+
+resistome <- resistome |> mutate(aro_value = str_extract(gene_info, "ARO:([0-9]+)"))
+```
+
+```{r}
+resistome.matrix <- reshape2::dcast(resistome, resistome$genome~resistome$gene, drop = FALSE)
+
+row.names(resistome.matrix) <- resistome.matrix$`resistome$genome`
+
+resistome.matrix <- resistome.matrix[,-1]
+
+resistome.matrix #mostra presença e quantidade
+
+resistome.matrix.bin <- resistome.matrix
+
+resistome.matrix.bin[resistome.matrix.bin > 0] <- 1 
+```
+
+```{r}
+aro_categories <- read.table('data/aro_categories.tsv', sep = '\t', header = T)
+
+aro_index <- data.table::fread('data/aro_index.tsv', sep = '\t', header = T)
+
+aro_annotation <- resistome |> dplyr::left_join(aro_index, by = c('aro_value' = 'ARO Accession'))
+```
+
+### core-score (não faz sentido aqui)
+```{r}
+# Default 1000 replications of 20 genomes
+core_score <- function(df, N=1000, sample_size=20){
+  counter <- 0
+  all_dfs <- list() 
+  
+  for(i in seq_len(N)){
+    counter <- counter + 1
+  
+  if(counter %in% seq(0, N, 500)){
+    print(paste(counter, " simulations have been processed at", Sys.time()))
+  }
+    
+    df_sampled <- cbind(iteration=counter, dplyr::sample_n(df, sample_size, replace = F))
+    
+    all_dfs[[paste(counter)]] <- df_sampled
+  
+  }
+
+big.data <- do.call(rbind, all_dfs)
+
+#Calculating the core score
+print("calculating the core score")
+
+score_table <- reshape2::melt(big.data, id=c("iteration", "genome")) |>
+  dplyr::filter(value >= 1) |>
+  dplyr::group_by(iteration, variable) |>
+  dplyr::mutate(abs_freq = sum(value),
+                rel_freq = abs_freq/sample_size, #sample size
+                category = ifelse(rel_freq >= 0.95, "core", "acc")) |> 
+  dplyr::ungroup() |>
+  dplyr::group_by(variable) |>
+  dplyr::mutate(score = mean(category == "core"),
+                status = ifelse(score >=0.90, "core", "acc")) |>
+  dplyr::ungroup() |>
+  dplyr::select(c("variable","score", "status")) |>
+  dplyr::distinct(variable, .keep_all = T)
+
+return(score_table)
+}
+```
+
+```{r}
+resistome_casted <- resistome |> dplyr::select(genome, aro_value) |>
+  reshape2::dcast(formula = genome~aro_value, fun.aggregate = length)
+resistome_casted
+```
+
+```{r}
+df_resistome_score <- core_score(df=resistome_casted,sample_size=20, N=1000)
+
+colnames(df_resistome_score) <- c("ARO", "score", "status")
+head(df_resistome_score)
+```
+
+```{r}
+unique_categories <- unique(aro_annotation$`Resistance Mechanism`)
+colors <- RColorBrewer::brewer.pal(length(unique_categories), "Set3")
+names(colors) <- unique_categories
+```
+
+```{r}
+annotation_vector <- setNames(aro_annotation$`Resistance Mechanism`, aro_annotation$gene)
+
+annotation_df <- data.frame(Antibiotic_Category = annotation_vector[colnames(resistome.matrix.bin)])
+rownames(annotation_df) <- colnames(resistome.matrix.bin)
+
+```
+
+```{r}
+# Fazendo uma cópia temporária do data frame de anotações
+ann_tmp <- annotation_df
+colnames(ann_tmp)[colnames(ann_tmp) == "Antibiotic_Category"] <- "Action method"
+
+# Garante que a coluna seja fator com níveis corretos
+ann_tmp$`Action method` <- as.factor(ann_tmp$`Action method`)
+
+# Ajusta o nome da lista de cores
+colors_tmp <- colors
+names(colors_tmp) <- levels(ann_tmp$`Action method`)
+
+rownames(resistome.matrix.bin) <- rownames(resistome.matrix.bin) |> gsub(pattern = '.fna', replacement = '') |> gsub(pattern = 'Isolate_1', replacement = 'New Isolate A') |> gsub(pattern = 'Isolate_2', replacement = 'New Isolate B') |> gsub(pattern = 'Isolate_3', replacement = 'New Isolate C') |> gsub(pattern = 'Isolate_4', replacement = 'New Isolate D')
+
+colnames(resistome.matrix.bin) <- colnames(resistome.matrix.bin) |> gsub(pattern = 'Pseudomonas aeruginosa soxR', replacement = 'soxR') |> gsub(pattern = 'Agrobacterium fabrum chloramphenicol acetyltransferase', replacement = 'CAT') 
+
+rownames(ann_tmp) <- rownames(ann_tmp) |> gsub(pattern = 'Pseudomonas aeruginosa soxR', replacement = 'soxR') |> gsub(pattern = 'Agrobacterium fabrum chloramphenicol acetyltransferase', replacement = 'CAT') 
+
+ann_tmp$gene <- rownames(ann_tmp)
+
+ann_tmp_ordered <- ann_tmp[match(colnames(resistome.matrix.bin), ann_tmp$gene), ]
+
+library(ComplexHeatmap)
+
+# Crie um dataframe de anotação para as colunas do heatmap
+column_ha <- HeatmapAnnotation(
+  Category = ann_tmp_ordered$`Action method`,
+  col = list(`Action method` = c(
+    "antibiotic inactivation" = '#FDE725',  # Color for "antibiotic inactivation"
+    "antibiotic efflux" = "#440658",      # Color for "antibiotic efflux"
+    "antibiotic efflux;antibiotic target alteration" = "#2DB37C" # Color for the combined category (I've chosen purple, feel free to change)
+  )),
+  annotation_name_side = "left"
+)
+
+# --- 3. Criar o Heatmap Setorizado ---
+library(colorRamp2)
+# Ajuste a paleta de cores para o heatmap binário (0 e 1)
+col_fun = colorRamp2(c(0, 1), c("#F2F3F3", "#646465"))
+# Crie o heatmap
+ht_list <- Heatmap(
+  resistome.matrix.bin,
+  name = "Presença/Ausência", # Título da legenda de cor do heatmap
+  col = col_fun,
+  cluster_rows = FALSE, # Disable default clustering
+  row_order = my_custom_row_order,  
+  cluster_columns = FALSE, # Não agrupa as colunas automaticamente, pois você quer setorizar
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 6),
+  row_names_gp = gpar(fontsize = 6),
+  top_annotation = column_ha, # Adiciona a anotação de categoria no topo
+  
+  # Dividir o heatmap pelas categorias
+  column_split = ann_tmp_ordered$`Action method`, # Divide as colunas com base na coluna 'Category'
+  column_title_gp = gpar(fontsize = 10, fontface = "bold"), # Estilo dos títulos dos setores
+  column_gap = unit(3, "mm"), # Espaçamento entre os setores
+  
+  # Adicionar um título geral ao heatmap, se desejar
+  heatmap_legend_param = list(
+    title = "Gene Presente",
+    at = c(0, 1),
+    labels = c("Ausente", "Presente")
+  )
+)
+
+# Desenhar o heatmap
+draw(ht_list,
+     heatmap_legend_side = "left", # Posição da legenda do heatmap
+     annotation_legend_side = "right" # Posição da legenda das anotações
+) #10/7
+
+```
+
+### Virulome
+
+```{r}
+virulome <- read.csv('data/virulence', sep = '\t', header = F)
+
+colnames(virulome) <- c("genome", "query", "id", "evalue", "qlo", "qhi", "tlo", "thi", "ql", "tl", "bits")
+```
+```{r}
+virulome <- virulome |> mutate(Gene_Name = str_extract(query, "\\(([^)]+)\\)\\s*\\(([^)]+)\\)") |>
+           str_replace(".*\\(([^)]+)\\)$", "\\1"))
+virulome <- virulome |> dplyr::mutate(VFCID = stringr::str_extract(query, "^[^(]+"))
+virulome <- virulome |> dplyr::mutate(VFID = stringr::str_extract(query, "\\(VF[0-9]+\\)") |> stringr::str_remove_all("[()]"))
+```
+
+```{r}
+metadata_vir <- readxl::read_excel('data/VFs.xls')
+```
+```{r}
+vir.matrix <- reshape2::dcast(virulome, virulome$genome~virulome$gene, drop = FALSE)
+
+row.names(vir.matrix) <- vir.matrix$`virulome$genome`
+
+vir.matrix <- vir.matrix[,-1]
+
+vir.matrix #mostra presença e quantidade
+
+vir.matrix.bin <- vir.matrix
+
+vir.matrix.bin[vir.matrix.bin > 0] <- 1 
+```
+
+```{r}
+library(RColorBrewer)
+
+# Obter categorias únicas
+unique_categories <- unique(metadata_vir$VFcategory)
+
+# Gerar cores suficientes usando uma interpolação da paleta Set3
+colors <- colorRampPalette(brewer.pal(12, "Set3"))(length(unique_categories))
+
+# Nomear as cores conforme as categorias
+names(colors) <- unique_categories
+```
+
+```{r}
+metadata_vir <- metadata_vir |> dplyr::left_join(virulome, by = 'VFID')
+  
+annotation_vector <- setNames(metadata_vir$VFcategory, metadata_vir$Gene_Name)
+
+# 3. Criar a tabela de anotações para o heatmap
+annotation_df <- data.frame(Virulence_class = annotation_vector[colnames(vir.matrix.bin)])
+
+# 4. Definir os nomes das linhas como os nomes dos genes
+rownames(annotation_df) <- colnames(vir.matrix.bin)
+
+```
+
+## Plant growth promotion
+
+```{bash}
+#criando a db
+./usearch -makeudb_usearch PGP_general_database.fasta -output pgp.udb
+
+#rodando
+
+for i in ../analysis_stage/faa/*; do echo processing $i; GENOME=$(basename $i .faa); ./usearch -usearch_global $i -db pgp.udb -top_hit_only -evalue 1.0e-05 -id 0.5 -query_cov 0.5 -target_cov 0.5 -userout $GENOME\.pg -userfields query+target+id+evalue+qlo+qhi+tlo+thi+ql+tl+bits;done
+
+#adicionando coluna com o nome da cepa
+for i in *.pg; do echo processing $i; GENOME=$(basename $i .pg); sed -i "s/^/$GENOME\t/g" $i;done
+
+#fazendo um arquivo só
+
+cat *.pg > pg_promotion
+
+```
+
+```{r}
+pg_promotion <- read.csv('data/pg_promotion', sep = '\t', header = F)
+
+colnames(pg_promotion) <- c("genome", "query", "gene_info", "id", "evalue", "qlo", "qhi", "tlo", "thi", "ql", "tl", "bits")
+pg_promotion$genome <- as.factor(pg_promotion$genome)
+```
+
+```{r}
+pg_promotion.matrix <- reshape2::dcast(pg_promotion, pg_promotion$genome~pg_promotion$gene, drop = FALSE)
+
+row.names(pg_promotion.matrix) <- pg_promotion.matrix$`pg_promotion$genome`
+
+pg_promotion.matrix <- pg_promotion.matrix[,-1]
+
+pg_promotion.matrix #mostra presença e quantidade
+
+pg_promotion.matrix.bin <- pg_promotion.matrix
+
+pg_promotion.matrix.bin[pg_promotion.matrix.bin > 0] <- 1 
+
+colnames(pg_promotion.matrix.bin) <- str_extract(colnames(pg_promotion.matrix.bin),  "^[^_]+") 
+```
+
+```{r}
+gene_names <- str_extract(colnames(pg_promotion.matrix.bin), "^[^_]+")
+
+pg_merged <- as.data.frame(
+  sapply(unique(gene_names), function(g) {
+    gene_cols <- which(gene_names == g)  # Pega índices das colunas do mesmo gene
+    rowSums(pg_promotion.matrix.bin[, gene_cols, drop = FALSE]) > 0  # Converte para presença/ausência
+  })
+)
+
+# 3. Ajustar os nomes das colunas
+colnames(pg_merged) <- unique(gene_names)
+
+# 4. Converter valores lógicos para 0 e 1
+pg_merged <- as.data.frame(lapply(pg_merged, as.integer))
+
+# 5. Adicionar os nomes dos genomas de volta
+rownames(pg_merged) <- rownames(pg_promotion.matrix.bin)
+
+```
+
+```{r}
+pgpb_metadata <- read.csv('data/db-metadata.csv', sep = '\t')
+pgpb_metadata$db_ID <- gsub('>', '', pgpb_metadata$db_ID)
+```
+
+```{r}
+unique_categories <- unique(pgpb_metadata$Class)
+colors <- RColorBrewer::brewer.pal(length(unique_categories), "Set3")
+names(colors) <- unique_categories
+```
+
+```{r}
+temp <- pgpb_metadata
+temp <- temp |> dplyr::mutate(db_ID = stringr::str_replace(db_ID, "_[0-9]+$", ""))
+
+annotation_vector <- setNames(temp$Class, temp$db_ID)
+
+annotation_df <- data.frame(Plant_Growth_class = annotation_vector[colnames(pg_merged)])
+rownames(annotation_df) <- colnames(pg_merged)
+
+```
+
+```{r}
+pg_merged
+annotation_df
+as.data.frame(ann_tmp$Plant_Growth_class) |> dplyr::distinct()
+```
+
+```{r}
+ann_tmp <- annotation_df
+
+# Garante que a coluna seja fator com níveis corretos
+ann_tmp$Plant_Growth_class <- as.factor(ann_tmp$Plant_Growth_class)
+
+# Ajusta o nome da lista de cores
+
+rownames(pg_merged) <- rownames(pg_merged) |> gsub(pattern = '.fna', replacement = '') |> gsub(pattern = 'Isolate_1', replacement = 'New Isolate A') |> gsub(pattern = 'Isolate_2', replacement = 'New Isolate B') |> gsub(pattern = 'Isolate_3', replacement = 'New Isolate C') |> gsub(pattern = 'Isolate_4', replacement = 'New Isolate D')
+
+ann_tmp$gene <- rownames(ann_tmp)
+
+ann_tmp_ordered <- ann_tmp[match(colnames(pg_merged), ann_tmp$gene), ]
+
+library(ComplexHeatmap)
+
+# Crie um dataframe de anotação para as colunas do heatmap
+column_ha <- HeatmapAnnotation(
+  Category = ann_tmp_ordered$Plant_Growth_class,
+  col = list(`Plant_Growth_class` = c(
+    "Ethylene levels reduction" = '#FDE725',  
+    "Indolic compounds" = "#440658",      
+    "N fixation" = "#2DB37C",
+    'P solubilization' = 'blue'
+  )),
+  annotation_name_side = "left"
+)
+
+my_custom_row_order <- c(
+    "GCA_003115895.1",
+    "GCA_017876055.1",
+    "GCA_002573965.1",
+    "New Isolate A",
+    "New Isolate B",
+    "GCA_003116035.1",
+    "GCA_033469355.1",
+    "GCA_004923295.1",
+    "GCA_000010725.1",
+    "GCA_016595245.1",
+    "GCA_023806445.1",
+    "GCA_003116065.1",
+    "GCA_004923315.1",
+    "GCA_003115935.1",
+    "GCA_946480385.1",
+    "GCA_900177515.1",
+    "GCA_008365135.1",
+    "GCA_013347285.1",
+    "GCA_031455875.1",
+    "GCA_008364825.1",
+    "GCA_035628975.1",
+    "GCA_000283655.1",
+    "GCA_001639105.2",
+    "GCA_003233655.1",
+    "GCA_001305595.1",
+    "GCA_030814895.1",
+    "GCA_003116095.1",
+    "GCA_027486405.1",
+    "GCA_003966125.1",
+    "GCA_003590795.1",
+    "GCA_027485265.1",
+    "GCA_003989665.1",
+    "GCA_022214805.1",
+    "GCA_017876095.1",
+    "GCA_020005195.1",
+    "GCA_003130795.1",
+    "GCA_016632405.1",
+    "GCA_016622085.1",
+    "GCA_007827795.1",
+    "GCA_008365405.1",
+    "GCA_005222145.1",
+    "GCA_003584185.1",
+    "GCA_019780885.1",
+    "GCA_007827765.1",
+    "GCA_013341015.1",
+    "GCA_003119195.2",
+    "GCA_022023855.1",
+    "GCA_000632475.2",
+    "GCA_002895265.1",
+    "GCA_016652835.1",
+    "GCA_040152045.1",
+    "New Isolate C",
+    "GCA_008369925.1",
+    "GCA_005222165.1",
+    "GCA_005222185.1",
+    "GCA_040152005.1",
+    "GCA_003349955.1",
+    "New Isolate D",
+    "GCA_007827815.1",
+    "GCA_007828645.1",
+    "GCA_040500525.1",
+    "GCA_014192915.1",
+    "GCA_005222205.1",
+    "GCA_003119115.1",
+    "GCA_014596085.1",
+    "GCA_002245955.1",
+    "GCA_030849505.1",
+    "GCA_017876155.1",
+    "GCA_025961225.1",
+    "GCA_017876165.1"
+)
+
+# --- 3. Criar o Heatmap Setorizado ---
+library(colorRamp2)
+# Ajuste a paleta de cores para o heatmap binário (0 e 1)
+col_fun = colorRamp2(c(0, 1), c("#F2F3F3", "#646465"))
+# Crie o heatmap
+ht_list <- Heatmap(
+  pg_merged,
+  name = "Presence/Absence", # Título da legenda de cor do heatmap
+  col = col_fun,
+  cluster_rows = FALSE, # Disable default clustering
+  row_order = my_custom_row_order,  
+  cluster_columns = FALSE, # Não agrupa as colunas automaticamente, pois você quer setorizar
+  show_column_names = TRUE,
+  column_names_gp = gpar(fontsize = 6),
+  row_names_gp = gpar(fontsize = 6),
+  top_annotation = column_ha, # Adiciona a anotação de categoria no topo
+  
+  # Dividir o heatmap pelas categorias
+  column_split = ann_tmp_ordered$Plant_Growth_class, # Divide as colunas com base na coluna 'Category'
+  column_title_gp = gpar(fontsize = 10, fontface = "bold"), # Estilo dos títulos dos setores
+  column_gap = unit(3, "mm"), # Espaçamento entre os setores
+  
+  # Adicionar um título geral ao heatmap, se desejar
+  heatmap_legend_param = list(
+    title = "Gene Presente",
+    at = c(0, 1),
+    labels = c("Absent", "Present")
+  )
+)
+
+# Desenhar o heatmap
+draw(ht_list,
+     heatmap_legend_side = "left", # Posição da legenda do heatmap
+     annotation_legend_side = "right" # Posição da legenda das anotações
+) #10/7
+
+```
+
+### Get graph metrics
+
+```{r}
+get_graph_metrics <- function(g, lwr=0.70, upr=1.0){
+    
+  graph_metrics_list <- list()
+  
+  for(i in seq(lwr, upr, by=0.01)){
+    print(i)
+    g_filtered <- igraph::delete.edges(g, which(igraph::E(g)$identity < i))
+    g_components <- igraph::components(g_filtered)
+    
+    metrics <- data.frame(identity=i,
+                          density=igraph::graph.density(g_filtered),
+                          components=g_components$no,
+                          components_higher_10=length(g_components$csize[g_components$csize>10]),
+                          graph_size=igraph::gsize(g_filtered),
+                          modularity=igraph::modularity(g_filtered, igraph::components(g_filtered)$membership),
+                          transitivity=igraph::transitivity(g_filtered))
+    
+    graph_metrics_list[[paste(i)]] <- metrics
+  }
+  big.data <- do.call(rbind, graph_metrics_list)
+  return(big.data)
+}
+```
+
+```{r}
+graph_metrics <- get_graph_metrics(grafo)
+
+```
+
+## Parentese pro orthofinder
+```{bash}
+orthofinder -f analysis_stage/faa/ -M msa -t 40 -a 30
+conda deactivate
+conda activate iqtree
+iqtree -s faa/OrthoFinder/ = ults_Jan17/MultipleSequenceAlignments/SpeciesTreeAlignment.fa -st AA -seed 2000 -T 45 -o GCA_000013085.1 -m TEST -B 1000
+```
+
+## Criar labels
+
+```{r}
+# Supondo que seu ID original do IQ-TREE seja o nome do vértice
+vertex_data <- data.frame(
+  id = V(g)$name,
+  epithet = V(g)$ncbi_epithet,
+  reference = V(g)$Reference
+)
+
+# Cria rótulo customizado com base nos atributos
+vertex_data <- vertex_data %>%
+  mutate(
+    label = case_when(
+      !is.na(reference) & reference == "Reference" ~ paste0(epithet, " [Ref]"),
+      TRUE ~ epithet
+    )
+  )
+
+write.table(vertex_data[, c("id", "label")],
+            file = "tip_labels_map.tsv",
+            quote = FALSE,
+            row.names = FALSE,
+            col.names = FALSE,
+            sep = "\t")
+
+```
+# Labels de comunidades
+
+```{r}
+
+communities <- igraph::membership(lp) |> as.data.frame() 
+communities$V1 <- rownames(communities)
+communities$Community <- communities$x
+communities$x <- NULL
+
+azo_metadados <- communities |> dplyr::left_join(azo_metadados)
+
+write.csv2(azo_metadados, file = 'data/azo_metadados.csv', col.names = T, sep = '\t')
+```
